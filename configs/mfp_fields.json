@@ -1,0 +1,76 @@
+{
+  "konica_minolta": {
+    "_note": "字段名随固件版本不同而变化，以下为示例映射；若自动注册失败请在复印机 Web Connection 页面查看真实字段名后修改此处。",
+    "login": {
+      "action": "/wcd_login.cgi",
+      "user_field": "user",
+      "pass_field": "password"
+    },
+    "registration_entry": {
+      "url": "/wcd_main.cgi",
+      "link_text": "目的地注册"
+    },
+    "ftp_form": {
+      "url": "/wcd_reg_ftp.cgi",
+      "fields": {
+        "name": "dest_name",
+        "host": "host_address",
+        "port": "port_no",
+        "user": "login_name",
+        "password": "login_password",
+        "dir": "save_path"
+      },
+      "extras": {
+        "mode": "0"
+      }
+    }
+  },
+  "ricoh": {
+    "_note": "理光示例占位，需根据实际机型补充字段后启用。",
+    "login": {
+      "action": "/web/entry/en/login.html",
+      "user_field": "user_id",
+      "pass_field": "password"
+    },
+    "registration_entry": {
+      "url": "/web/entry/en/address/book.html",
+      "link_text": "Address Book"
+    },
+    "ftp_form": {
+      "url": "/web/entry/en/address/ftp_add.html",
+      "fields": {
+        "name": "display_name",
+        "host": "server_name",
+        "port": "port_no",
+        "user": "login_user_name",
+        "password": "login_password",
+        "dir": "path"
+      },
+      "extras": {}
+    }
+  },
+  "fuji": {
+    "_note": "富士胶片示例占位，需根据实际机型补充字段后启用。",
+    "login": {
+      "action": "/cgi-bin/login.cgi",
+      "user_field": "user",
+      "pass_field": "passwd"
+    },
+    "registration_entry": {
+      "url": "/cgi-bin/menu.cgi",
+      "link_text": "Address Book"
+    },
+    "ftp_form": {
+      "url": "/cgi-bin/addr_ftp.cgi",
+      "fields": {
+        "name": "name",
+        "host": "server",
+        "port": "port",
+        "user": "user",
+        "password": "pass",
+        "dir": "directory"
+      },
+      "extras": {}
+    }
+  }
+}

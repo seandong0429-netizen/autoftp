@@ -1,0 +1,23 @@
+{
+  "ftp": {
+    "host": "::",
+    "port": 2121,
+    "passive_ports": "30000-30010",
+    "scan_dir": "D:\\Scan",
+    "username": "scanner",
+    "password": "Scan@2026",
+    "enable_anonymous": true,
+    "anonymous_perm": "elradfmwMT",
+    "user_perm": "elradfmwMT"
+  },
+  "mfp": {
+    "brand": "konica_minolta",
+    "ip": "",
+    "admin_user": "admin",
+    "admin_password": "",
+    "timeout": 15
+  },
+  "network": {
+    "prefer_ipv6": true
+  }
+}
