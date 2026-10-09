@@ -113,6 +113,16 @@ python gui_app.py
 > 权限字符（pyftpdlib 约定）：
 > `e`改目录、`l`列表、`r`读、`a`追加、`d`删除、`f`重命名、`m`建目录、`w`写、`M`改权限、`T`改时间。
 
+### 配置文件位置（打包后）
+
+程序按「**先外后内**」查找 `configs/` 下的配置文件：
+
+1. **外部**：`AutoFTP.exe` 同目录的 `configs/`（推荐在这里修改，日志标注 `[External]`）。
+2. **内置**：打包进 exe 的默认副本（日志标注 `[Built-in]`），保证开箱即用。
+
+若外部文件不存在，程序会自动从内置副本生成一份到 exe 同目录，便于后续修改。
+因此要调整字段映射，只需在 exe 同级目录创建 `configs/mfp_fields.json` 覆盖即可，无需重新打包。
+
 ### `configs/mfp_fields.json`
 
 不同固件版本的 Web Connection HTML 字段名不同，因此把字段名抽到配置文件。结构示例：

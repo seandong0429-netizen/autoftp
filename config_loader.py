@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import socket
+import sys
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -52,16 +54,45 @@ def get_project_root() -> Path:
     return Path(__file__).resolve().parent
 
 
-def get_config_dir() -> Path:
-    return get_project_root() / "configs"
+def get_app_dir() -> str:
+    """返回“应用目录”：打包后为 exe 所在目录，开发环境为项目根目录。
+
+    用户可修改的配置应放在这里（exe 同目录），而不是打包内部的临时解压目录。
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return str(get_project_root())
 
 
-def get_config_path() -> Path:
-    return get_config_dir() / "scan_config.json"
+def get_resource_path(*parts: str) -> str:
+    """返回内置资源文件的绝对路径，兼容 PyInstaller 打包环境（可复用）。
+
+    - 打包后（--onefile）：资源随 exe 解压到 ``sys._MEIPASS`` 临时目录。
+    - 开发环境：相对于本文件所在目录（项目根）。
+    统一用 ``os.path.join`` 拼接，不硬编码路径分隔符；
+    也兼容传入 "configs/mfp_fields.json" 这类已含分隔符的写法。
+    """
+    base = getattr(sys, "_MEIPASS", None)
+    if not base:
+        base = str(get_project_root())
+    segments = []
+    for part in parts:
+        # 兼容正/反斜杠输入，按段重组后再用 os.path.join 拼接
+        segments.extend(seg for seg in re.split(r"[\\/]+", str(part)) if seg)
+    return os.path.join(base, *segments)
 
 
-def get_fields_path() -> Path:
-    return get_config_dir() / "mfp_fields.json"
+def get_config_dir() -> str:
+    """配置文件目录（exe 同目录 / 项目根 下的 configs）。"""
+    return os.path.join(get_app_dir(), "configs")
+
+
+def get_config_path() -> str:
+    return os.path.join(get_config_dir(), "scan_config.json")
+
+
+def get_fields_path() -> str:
+    return os.path.join(get_config_dir(), "mfp_fields.json")
 
 
 def parse_passive_ports(value: Any) -> Tuple[int, int]:
@@ -110,19 +141,46 @@ def _deep_merge(default: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, 
     return result
 
 
-def load_config() -> Dict[str, Any]:
-    """加载配置；不存在则生成默认配置。"""
-    path = get_config_path()
-    if not path.exists():
-        save_config(DEFAULT_CONFIG)
-        logger.info("未发现配置文件，已生成默认配置: %s", path)
-        return _deep_merge(DEFAULT_CONFIG, {})
+def _read_json(path: str, label: str) -> Optional[Dict[str, Any]]:
+    """读取 JSON 文件；失败时记录错误并返回 None（保持原有异常处理风格）。"""
     try:
         with open(path, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
+            return json.load(f)
     except (json.JSONDecodeError, OSError) as e:
-        logger.error("读取配置失败，回退默认: %s", e)
+        logger.error("读取%s失败: %s", label, e)
+        return None
+
+
+def load_config() -> Dict[str, Any]:
+    """加载主配置。
+
+    顺序：外部（exe 同目录 / 项目 configs）scan_config.json → 打包内置副本 → 内置默认。
+    外部不存在时会用内置内容生成一份外部配置，方便用户修改。
+    """
+    external = get_config_path()
+    if os.path.exists(external):
+        cfg = _read_json(external, "配置")
+        if cfg is not None:
+            logger.info("[External] 已加载配置: %s", external)
+            return _deep_merge(DEFAULT_CONFIG, cfg)
         return _deep_merge(DEFAULT_CONFIG, {})
+
+    # 外部不存在：尝试打包内置副本（确保开箱即用）
+    builtin = get_resource_path("configs", "scan_config.json")
+    cfg: Optional[Dict[str, Any]] = None
+    if os.path.exists(builtin) and os.path.abspath(builtin) != os.path.abspath(external):
+        cfg = _read_json(builtin, "内置配置")
+        if cfg is not None:
+            logger.info("[Built-in] 未发现外部配置，使用内置配置: %s", builtin)
+    if cfg is None:
+        cfg = DEFAULT_CONFIG
+
+    # 落一份到外部目录，便于用户修改（失败不影响启动）
+    try:
+        save_config(cfg)
+        logger.info("[External] 已生成外部配置文件: %s", external)
+    except (ValueError, OSError) as e:
+        logger.warning("生成外部配置失败（忽略）: %s", e)
     return _deep_merge(DEFAULT_CONFIG, cfg)
 
 
@@ -136,23 +194,36 @@ def save_config(cfg: Dict[str, Any]) -> None:
     if isinstance(ftp, dict) and "passive_ports" in ftp:
         ftp["passive_ports"] = validate_passive_ports(ftp["passive_ports"])
     path = get_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
 
 
 def load_fields() -> Dict[str, Any]:
-    """加载 mfp_fields.json 字段映射；不存在返回空 dict。"""
-    path = get_fields_path()
-    if not path.exists():
-        logger.warning("字段映射文件缺失: %s", path)
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        logger.error("字段映射读取失败: %s", e)
-        return {}
+    """加载字段映射 mfp_fields.json（先外后内）。
+
+    第一步：外部（exe 同目录 / 项目 configs）存在则读取返回；
+    第二步：否则读取通过 ``get_resource_path`` 定位的打包内置副本；
+    第三步：两者都不存在则返回空 dict 并记录 Warning（保持原有降级逻辑）。
+    """
+    external = get_fields_path()
+    if os.path.exists(external):
+        data = _read_json(external, "外部字段映射")
+        if data is None:
+            return {}
+        logger.info("[External] 已加载字段映射: %s", external)
+        return data
+
+    builtin = get_resource_path("configs", "mfp_fields.json")
+    if os.path.exists(builtin):
+        data = _read_json(builtin, "内置字段映射")
+        if data is None:
+            return {}
+        logger.info("[Built-in] 已加载内置字段映射: %s", builtin)
+        return data
+
+    logger.warning("字段映射文件缺失（外部与内置均未找到）: %s", external)
+    return {}
 
 
 def get_local_ipv4() -> str:
