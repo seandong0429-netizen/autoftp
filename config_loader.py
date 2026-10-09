@@ -9,11 +9,17 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import socket
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 logger = logging.getLogger(__name__)
+
+# ---- 被动端口范围约束 ----
+MIN_PASSIVE_PORT = 1024
+MAX_PASSIVE_PORT = 65535
+MAX_PASSIVE_SPAN = 1000  # 跨度上限（结束 - 起始）
 
 # 默认配置：仅作为示例，包含的密码请务必在部署时修改。
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -32,8 +38,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "brand": "konica_minolta",
         "ip": "",
         "admin_user": "admin",
-        "admin_password": "",         # 由用户在界面填入
+        "admin_password": "",         # 由用户在界面填入；允许为空（先免管理员尝试）
         "timeout": 15,
+        "try_without_admin": True,    # 先尝试免管理员提交，遇权限拒绝再升级
     },
     "network": {
         "prefer_ipv6": True,
@@ -55,6 +62,39 @@ def get_config_path() -> Path:
 
 def get_fields_path() -> Path:
     return get_config_dir() / "mfp_fields.json"
+
+
+def parse_passive_ports(value: Any) -> Tuple[int, int]:
+    """解析并校验被动端口范围字符串，返回 (start, end)。
+
+    规则：格式必须是 ``起始-结束``（纯数字、单个半角减号），
+    ``1024 <= 起始 <= 结束 <= 65535`` 且跨度 ``结束-起始 <= 1000``。
+    不合法时抛 ValueError（中文提示），绝不静默解析或回退随机端口。
+    """
+    text = str(value).strip()
+    parts = text.split("-")
+    if len(parts) != 2 or not all(re.fullmatch(r"[0-9]+", p.strip()) for p in parts):
+        raise ValueError(
+            f"被动端口格式错误：“{value}”，应为“起始-结束”"
+            f"（纯数字、单个半角减号），例如 30000-30010"
+        )
+    start, end = int(parts[0]), int(parts[1])
+    if not (MIN_PASSIVE_PORT <= start <= end <= MAX_PASSIVE_PORT):
+        raise ValueError(
+            f"被动端口范围非法：“{value}”，需满足 "
+            f"{MIN_PASSIVE_PORT} <= 起始 <= 结束 <= {MAX_PASSIVE_PORT}，例如 30000-30010"
+        )
+    if end - start > MAX_PASSIVE_SPAN:
+        raise ValueError(
+            f"被动端口跨度过大：“{value}”，跨度不得超过 {MAX_PASSIVE_SPAN}，例如 30000-30010"
+        )
+    return start, end
+
+
+def validate_passive_ports(value: Any) -> str:
+    """校验并返回规范化后的被动端口字符串（不合法则抛 ValueError）。"""
+    start, end = parse_passive_ports(value)
+    return f"{start}-{end}"
 
 
 def _deep_merge(default: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -87,6 +127,14 @@ def load_config() -> Dict[str, Any]:
 
 
 def save_config(cfg: Dict[str, Any]) -> None:
+    """保存配置。
+
+    保存前校验 ``ftp.passive_ports``：不合法则抛 ValueError 拒绝保存
+    （不会静默解析或回退随机端口）。
+    """
+    ftp = cfg.get("ftp") if isinstance(cfg, dict) else None
+    if isinstance(ftp, dict) and "passive_ports" in ftp:
+        ftp["passive_ports"] = validate_passive_ports(ftp["passive_ports"])
     path = get_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:

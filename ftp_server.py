@@ -17,6 +17,8 @@ from pyftpdlib.authorizers import DummyAuthorizer
 from pyftpdlib.handlers import FTPHandler
 from pyftpdlib.servers import FTPServer
 
+import config_loader
+
 logger = logging.getLogger(__name__)
 
 # 权限字符含义：
@@ -72,9 +74,11 @@ class FTPServerManager:
     def _build_handler(self) -> FTPHandler:
         ftp_cfg = self.config["ftp"]
         handler = FTPHandler
-        pp = ftp_cfg.get("passive_ports", "30000-30010")
-        start, _, end = pp.partition("-")
-        handler.passive_ports = range(int(start), int(end) + 1)
+        # 被动端口解析与校验：不合法直接抛 ValueError，绝不静默解析或回退随机端口
+        start, end = config_loader.parse_passive_ports(
+            ftp_cfg.get("passive_ports", "30000-30010")
+        )
+        handler.passive_ports = range(start, end + 1)
         handler.masquerade_address = None
         handler.permit_foreign_address = True
         handler.encoding = "utf-8"
@@ -107,6 +111,10 @@ class FTPServerManager:
             handler.authorizer = auth
             sock = self._build_dual_stack_socket(host, port)
             self.server = FTPServer(sock, handler)
+        except ValueError as e:
+            # 被动端口等配置非法：拒绝启动并给出中文说明
+            self._log_ftp(f"FTP 服务启动失败：{e}")
+            return False
         except OSError as e:
             self._log_ftp(f"FTP 服务启动失败: {e}")
             return False

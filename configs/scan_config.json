@@ -15,7 +15,8 @@
     "ip": "",
     "admin_user": "admin",
     "admin_password": "",
-    "timeout": 15
+    "timeout": 15,
+    "try_without_admin": true
   },
   "network": {
     "prefer_ipv6": true

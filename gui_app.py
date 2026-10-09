@@ -10,8 +10,9 @@ import logging
 import queue
 import threading
 import tkinter as tk
+import webbrowser
 from tkinter import filedialog, messagebox, ttk
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
 
 import config_loader
 import firewall_helper
@@ -376,14 +377,19 @@ class AutoFTPApp:
         self.mfp_combo.bind("<<ComboboxSelected>>", self._on_mfp_selected)
 
         r += 1
-        tk.Label(body, text="管理员账号", bg=BG_CARD, fg=MUTED,
+        tk.Label(body, text="管理员账号（可选）", bg=BG_CARD, fg=MUTED,
                  font=(FONT, 9)).grid(row=r, column=0, sticky="w", **pad)
         ttk.Entry(body, textvariable=self.admin_user_var).grid(
             row=r, column=1, sticky="we", **pad)
-        tk.Label(body, text="管理员密码", bg=BG_CARD, fg=MUTED,
+        tk.Label(body, text="管理员密码（可选）", bg=BG_CARD, fg=MUTED,
                  font=(FONT, 9)).grid(row=r, column=2, sticky="w", **pad)
         ttk.Entry(body, textvariable=self.admin_pass_var, show="•").grid(
             row=r, column=3, sticky="we", **pad)
+
+        r += 1
+        tk.Label(body, text="先免管理员尝试；仅在提示权限不足时再填此处账号密码重试。",
+                 bg=BG_CARD, fg=MUTED, font=(FONT, 9)).grid(
+            row=r, column=0, columnspan=4, sticky="w", **pad)
 
         r += 1
         self.ipv6_toggle = self._make_toggle(
@@ -398,6 +404,9 @@ class AutoFTPApp:
                                       style="Accent.TButton",
                                       command=self._auto_register)
         self.register_btn.pack(side="left")
+        self.manual_btn = ttk.Button(reg_row, text="手动注册（浏览器）",
+                                     command=self._manual_register)
+        self.manual_btn.pack(side="left", padx=(8, 0))
         self.reg_status_lbl = tk.Label(reg_row, textvariable=self.reg_status_var,
                                        bg=BG_CARD, fg=MUTED,
                                        font=(FONT, 10, "bold"))
@@ -406,9 +415,9 @@ class AutoFTPApp:
         r += 1
         hint = (
             "使用流程：点「扫描局域网」自动检测复印机 → 在「检测结果」中选择目标 →\n"
-            "填管理员账号密码 → 点「一键注册到复印机」。\n"
+            "直接点「一键注册到复印机」先免管理员尝试；若提示权限不足，再填管理员账号密码重试。\n"
             "扫描不到时可直接在「复印机 IP」手动输入 IP 再点注册。\n"
-            "自动注册失败会自动打开浏览器并显示需填写的参数。"
+            "无法自动完成时会打开浏览器并显示需手动填写的参数。"
         )
         tk.Label(body, text=hint, bg=BG_CARD, fg=MUTED, justify="left",
                  font=(FONT, 9)).grid(row=r, column=0, columnspan=4, sticky="w", **pad)
@@ -423,15 +432,18 @@ class AutoFTPApp:
             self.ftp_status_lbl.configure(fg="#fca5a5")
 
     def _set_reg_status(self, state: str) -> None:
-        """state ∈ idle / running / success / warn"""
+        """state ∈ idle / running / success / warn / admin"""
         if state == "success":
             self.reg_status_var.set("✅ 注册成功")
             self.reg_status_lbl.configure(fg=SUCCESS)
         elif state == "running":
             self.reg_status_var.set("⟳ 注册中…")
             self.reg_status_lbl.configure(fg=RUNNING)
+        elif state == "admin":
+            self.reg_status_var.set("⚠️ 需管理员权限，请补填重试")
+            self.reg_status_lbl.configure(fg=WARN)
         elif state == "warn":
-            self.reg_status_var.set("⚠️ 注册失败，见日志")
+            self.reg_status_var.set("⚠️ 未自动完成，见日志")
             self.reg_status_lbl.configure(fg=WARN)
         else:
             self.reg_status_var.set("○ 待注册")
@@ -522,6 +534,10 @@ class AutoFTPApp:
                 "admin_user": self.admin_user_var.get(),
                 "admin_password": self.admin_pass_var.get(),
                 "timeout": 15,
+                # 保留配置开关（默认 true：先免管理员尝试）
+                "try_without_admin": bool(
+                    self.config.get("mfp", {}).get("try_without_admin", True)
+                ),
             },
             "network": {
                 "prefer_ipv6": bool(self.prefer_ipv6_var.get()),
@@ -532,11 +548,27 @@ class AutoFTPApp:
         self.config = self._collect_config()
         self.ftp_manager.config = self.config
 
+    def _validate_passive(self, show_dialog: bool = False) -> bool:
+        """校验被动端口输入；不合法时提示（保存 / 启动前调用）。"""
+        try:
+            config_loader.parse_passive_ports(self.passive_var.get())
+            return True
+        except ValueError as e:
+            if show_dialog:
+                messagebox.showerror("被动端口错误", str(e))
+            else:
+                self._append_log(f"被动端口错误：{e}")
+            return False
+
     def _save_config(self) -> None:
         self._sync_config()
+        if not self._validate_passive(show_dialog=True):
+            return
         try:
             config_loader.save_config(self.config)
             self._append_log("配置已保存到 configs/scan_config.json")
+        except ValueError as e:
+            messagebox.showerror("保存失败", str(e))
         except OSError as e:
             messagebox.showerror("保存失败", str(e))
 
@@ -546,6 +578,8 @@ class AutoFTPApp:
             int(self.port_var.get())
         except ValueError:
             messagebox.showerror("端口错误", "控制端口必须为整数")
+            return
+        if not self._validate_passive(show_dialog=True):
             return
 
         def worker():
@@ -579,6 +613,8 @@ class AutoFTPApp:
         except ValueError:
             messagebox.showerror("端口错误", "控制端口必须为整数")
             return
+        if not self._validate_passive(show_dialog=True):
+            return
         passive = self.passive_var.get() or "30000-30010"
 
         def worker():
@@ -597,45 +633,208 @@ class AutoFTPApp:
         if not self.mfp_ip_var.get().strip():
             messagebox.showwarning("缺少信息", "请先填写复印机 IP 地址")
             return
-        if not self._fields:
-            messagebox.showwarning(
-                "字段映射缺失",
-                "未找到 configs/mfp_fields.json，自动注册将直接降级为半自动模式。\n"
-                "请先补充字段映射。",
-            )
-
         self.register_btn.configure(state="disabled")
         self._set_reg_status("running")
+        # 可选开关：try_without_admin=False 时首次即用管理员
+        first_use_admin = not bool(
+            self.config.get("mfp", {}).get("try_without_admin", True)
+        )
+        self._start_register_worker(use_admin=first_use_admin)
 
+    def _start_register_worker(self, use_admin: bool) -> None:
+        """在子线程执行一次注册尝试，结果回主线程处理。"""
         def worker():
+            params: Dict[str, Any] = {}
             try:
                 params = mfp_register.build_ftp_params(
                     self.config, prefer_ipv6=bool(self.prefer_ipv6_var.get())
                 )
                 self._thread_log(
                     f"准备注册 FTP 目的地：host={params['host']} port={params['port']} "
-                    f"user={params['user']}"
+                    f"user={params['user']}（use_admin={use_admin}）"
                 )
-                strategy = mfp_register.get_register(
-                    self.config, self._fields, log=self._thread_log
+                result, strategy = mfp_register.register_to_mfp(
+                    self.config, self._fields, params,
+                    use_admin=use_admin, log=self._thread_log,
                 )
-                success = strategy.register(params)
-                if success:
-                    self._thread_log("✅ 复印机注册流程完成")
-                    self.root.after(0, lambda: self._set_reg_status("success"))
-                else:
-                    self._thread_log("已降级为半自动模式，请在浏览器中完成注册")
-                    self.root.after(0, lambda: self._set_reg_status("warn"))
-            except mfp_register.RegistrationError as e:
-                self._thread_log(f"注册错误：{e}")
-                self.root.after(0, lambda: self._set_reg_status("warn"))
             except Exception as e:  # noqa: BLE001
-                self._thread_log(f"注册异常：{e}")
-                self.root.after(0, lambda: self._set_reg_status("warn"))
-            finally:
-                self.root.after(0, lambda: self.register_btn.configure(state="normal"))
+                result = mfp_register.RegisterResult(
+                    False, mfp_register.STATUS_FALLBACK_SEMI_AUTO, f"注册异常：{e}"
+                )
+                strategy = None
+            self.root.after(
+                0, lambda: self._handle_register_result(result, strategy, params)
+            )
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_register(self) -> None:
+        self.register_btn.configure(state="normal")
+
+    def _handle_register_result(self, result, strategy, params) -> None:
+        """按状态码分支处理注册结果（主线程）。"""
+        status = result.status
+        self._append_log(f"注册最终状态：{status}")
+
+        # 成功
+        if status in (mfp_register.STATUS_OK, mfp_register.STATUS_NO_ADMIN_REQUIRED):
+            self._set_reg_status("success")
+            how = "已使用管理员账号" if result.used_admin else "免管理员完成"
+            messagebox.showinfo("注册成功", f"{result.message}\n完成方式：{how}")
+            self._finish_register()
+            return
+
+        # 权限不足 → 补填管理员重试
+        if status == mfp_register.STATUS_ADMIN_REQUIRED:
+            self._set_reg_status("admin")
+            if self._prompt_admin_retry(result, params):
+                return  # 已发起重试，保持按钮禁用
+            self._set_reg_status("warn")
+            self._finish_register()
+            return
+
+        # 缺映射表 / 字段 → 提示转半自动
+        if status == mfp_register.STATUS_FIELDS_MISSING:
+            self._set_reg_status("warn")
+            messagebox.showwarning(
+                "字段映射缺失",
+                f"{result.message}\n\n无法自动填写表单，将打开浏览器由你手动注册。\n"
+                f"可按 configs/mfp_fields.json 补充字段映射后重试。",
+            )
+            self._open_manual(strategy, params, "字段映射缺失")
+            self._finish_register()
+            return
+
+        # 设备不可达 → 单独提示
+        if status == mfp_register.STATUS_UNREACHABLE:
+            self._set_reg_status("warn")
+            messagebox.showerror(
+                "无法连接复印机",
+                f"{result.message}\n\n请核对：复印机 IP 是否正确、是否与本机同网段、"
+                f"复印机 Web Connection 是否已启用。",
+            )
+            self._finish_register()
+            return
+
+        # 其余 → 兜底半自动（register() 已自动打开浏览器）
+        self._set_reg_status("warn")
+        messagebox.showwarning(
+            "已切换半自动",
+            f"{result.message}\n\n已在浏览器打开注册页，请按日志中的参数手动填写并提交。",
+        )
+        self._open_manual(strategy, params, result.message, already_opened=True)
+        self._finish_register()
+
+    def _prompt_admin_retry(self, result, params) -> bool:
+        """弹出补填对话框，确认后用管理员会话重试。返回是否已发起重试。"""
+        creds = self._ask_admin_credentials(result.message)
+        if creds is None:
+            self._append_log("已取消管理员重试")
+            return False
+        user, password = creds
+        self.admin_user_var.set(user)
+        self.admin_pass_var.set(password)
+        self._sync_config()
+        self._append_log("已填入管理员账号，改用管理员会话重试注册…")
+        self._set_reg_status("running")
+        self._start_register_worker(use_admin=True)
+        return True
+
+    def _ask_admin_credentials(self, message: str) -> Optional[Tuple[str, str]]:
+        """补填管理员账号密码对话框。确定返回 (user, password)，取消返回 None。"""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("需要管理员权限")
+        dlg.configure(bg=BG_CARD)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+
+        holder: Dict[str, Optional[Tuple[str, str]]] = {"value": None}
+
+        tk.Label(dlg, text=message, bg=BG_CARD, fg=TEXT, justify="left",
+                 wraplength=360, font=(FONT, 10)).pack(
+            padx=16, pady=(14, 4), anchor="w")
+        tk.Label(dlg, text="当前账户没有权限写入目的地，请输入管理员账号后重试。",
+                 bg=BG_CARD, fg=MUTED, justify="left", wraplength=360,
+                 font=(FONT, 9)).pack(padx=16, pady=(0, 10), anchor="w")
+
+        form = tk.Frame(dlg, bg=BG_CARD)
+        form.pack(padx=16, pady=(0, 8), fill="x")
+        tk.Label(form, text="管理员账号", bg=BG_CARD, fg=MUTED,
+                 font=(FONT, 9)).grid(row=0, column=0, sticky="w", pady=4)
+        user_var = tk.StringVar(value=self.admin_user_var.get() or "admin")
+        ttk.Entry(form, textvariable=user_var, width=24).grid(
+            row=0, column=1, pady=4, padx=(8, 0))
+        tk.Label(form, text="管理员密码", bg=BG_CARD, fg=MUTED,
+                 font=(FONT, 9)).grid(row=1, column=0, sticky="w", pady=4)
+        pass_var = tk.StringVar(value=self.admin_pass_var.get())
+        ttk.Entry(form, textvariable=pass_var, show="•", width=24).grid(
+            row=1, column=1, pady=4, padx=(8, 0))
+
+        def on_ok() -> None:
+            holder["value"] = (user_var.get().strip(), pass_var.get())
+            dlg.destroy()
+
+        def on_cancel() -> None:
+            holder["value"] = None
+            dlg.destroy()
+
+        btns = tk.Frame(dlg, bg=BG_CARD)
+        btns.pack(padx=16, pady=(4, 14), fill="x")
+        ttk.Button(btns, text="重试注册", style="Accent.TButton",
+                   command=on_ok).pack(side="right")
+        ttk.Button(btns, text="取消", command=on_cancel).pack(side="right", padx=(0, 8))
+
+        dlg.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - dlg.winfo_width()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - dlg.winfo_height()) // 3
+        dlg.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        self.root.wait_window(dlg)
+        return holder["value"]
+
+    def _open_manual(self, strategy, params, reason: str,
+                     already_opened: bool = False) -> None:
+        """打开浏览器手动注册（半自动兜底）。"""
+        if already_opened:
+            return
+        if strategy is None:
+            url = self._default_register_url()
+            try:
+                webbrowser.open(url)
+            except Exception as e:  # noqa: BLE001
+                self._append_log(f"打开浏览器失败：{e}")
+            self._append_log(f"已打开浏览器：{url}")
+            if params:
+                self._append_log("请在浏览器中按以下参数手动填写：")
+                for k, v in params.items():
+                    self._append_log(f"  {k}: {v}")
+            return
+        strategy.fallback_semi_auto(params, reason)
+
+    def _default_register_url(self) -> str:
+        ip = self.mfp_ip_var.get().strip() or "127.0.0.1"
+        return f"http://{ip}/wcd_reg_ftp.cgi"
+
+    def _manual_register(self) -> None:
+        """用户手动触发半自动注册（打开浏览器并列出参数）。"""
+        self._sync_config()
+        if not self.mfp_ip_var.get().strip():
+            messagebox.showwarning("缺少信息", "请先填写复印机 IP 地址")
+            return
+        self._set_reg_status("warn")
+        params: Dict[str, Any] = {}
+        strategy = None
+        try:
+            params = mfp_register.build_ftp_params(
+                self.config, prefer_ipv6=bool(self.prefer_ipv6_var.get())
+            )
+            strategy = mfp_register.get_register(
+                self.config, self._fields, log=self._thread_log
+            )
+        except Exception as e:  # noqa: BLE001
+            self._thread_log(f"手动注册准备失败：{e}")
+        self._append_log("手动注册：打开浏览器并列出待填参数")
+        self._open_manual(strategy, params, "用户手动选择半自动")
 
     def _on_close(self) -> None:
         if self.ftp_manager.running:
