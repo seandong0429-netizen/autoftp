@@ -13,7 +13,7 @@
 - 通过 `enable_anonymous` 开关控制是否开启匿名访问；关闭后仅允许账号密码登录。
 - 默认优先使用 **IPv6** 地址注册到复印机（可在界面取消勾选回退 IPv4）。
 - 自动检测本机 IPv4 与 IPv6 全局地址并显示。
-- **自动扫描局域网内复印机**：并发探测子网，识别柯尼卡美能达 bizhub，结果以下拉框列出供选择。
+- **自动扫描局域网内复印机**：先做 SNMP v2c 探测（`sysDescr`/`sysObjectID`/`sysName`）识别厂商与型号，未命中的地址再用 Web 关键字兜底，结果以下拉框列出供选择。
 - 扫描不到时可直接手动填写复印机 IP，点「一键注册到复印机」完成注册。
 - 自动配置 Windows 防火墙（放行控制端口与被动端口）。
 - 柯尼卡美能达 bizhub 系列通过 Web Connection 自动注册目的地（`requests` + `BeautifulSoup`，不依赖浏览器自动化）。
@@ -31,7 +31,8 @@ autoftp/
 ├── config_loader.py          # 配置加载 / 保存 / 网络信息获取
 ├── firewall_helper.py        # Windows 防火墙配置（netsh）
 ├── ftp_server.py             # pyftpdlib 双栈 FTP 服务管理
-├── mfp_scanner.py            # 局域网复印机自动探测
+├── mfp_scanner.py            # 局域网复印机自动探测（SNMP 优先 + Web 兜底）
+├── snmp_client.py            # 纯标准库 SNMP v2c GET（手写 BER）
 ├── mfp_register.py           # 策略模式：复印机目的地自动注册
 ├── gui_app.py                # tkinter 图形界面
 ├── requirements.txt
@@ -60,6 +61,9 @@ pip install -r requirements.txt
 | `pyftpdlib` | FTP 服务实现 |
 | `requests` | 复印机 Web Connection HTTP 交互 |
 | `beautifulsoup4` | 解析复印机 HTML 页面、定位字段 |
+| `psutil` | 获取本机网卡子网掩码（推断扫描网段；缺失时回退系统命令/`/24`） |
+
+> SNMP 扫描为**纯标准库**实现（`socket` + 手写 BER，见 [snmp_client.py](snmp_client.py)），无需 `pysnmp` 等额外依赖。
 
 ## 运行
 
@@ -139,13 +143,24 @@ python gui_app.py
 
 ## 局域网复印机自动扫描
 
-- 工具取本机出口 IPv4（连到默认网关的那块网卡，已排除回环与常见虚拟网卡），按**真实子网掩码**推断网段；掩码取不到时回退 `/24`，网段过大时也会回退 `/24` 以免扫描失控。
-- 并发探测每个地址的 Web 端口（`80` / `443` / `8080`），其中 `443` 以 HTTPS 探测且关闭证书校验（复印机自签名证书常见）。
-- 对开放 Web 端口的主机抓取首页 HTML（只读首页、不跟随跳转），根据关键字（`KONICA MINOLTA` / `bizhub` / `Web Connection`）识别柯尼卡美能达设备，并解析页面 `<title>` 显示型号。
+识别采用 **SNMP 优先、Web 兜底** 两级策略：
+
+1. **SNMP 主识别（v2c，默认团体名 `public`，超时 `0.8s`）**
+   - 并发对子网内每个地址做 SNMP GET，读取 `sysDescr`(1.3.6.1.2.1.1.1.0)、`sysObjectID`(1.3.6.1.2.1.1.2.0)、`sysName`(1.3.6.1.2.1.1.5.0)。
+   - 按 varbind 结构取值，不做“报文里找可打印串”的猜测；`sysName` 为空时不会把团体名 `public` 误当作主机名。
+   - 厂商判定：`sysObjectID` 的 enterprise 前缀优先（`2636`=柯尼卡美能达、`118`=佳能、`367`=理光、`23`=惠普），无值再用 `sysDescr` 关键字兜底。
+   - 示例：`sysDescr` 返回 `KONICA MINOLTA bizhub C550i` → 厂商 `konica_minolta`，型号 `bizhub C550i`。
+   - SNMP 的实现是纯标准库（`socket` + 手写 BER，见 [snmp_client.py](snmp_client.py)），未引入 `pysnmp`。
+2. **Web 兜底**：仅对 SNMP 未命中的地址，探测 Web 端口（`80` / `443` / `8080`，`443` 走 HTTPS 且关闭证书校验），抓首页关键字识别。**SNMP 已识别的 IP 跳过 Web 探测。**
+
+其它：
+
+- 网段按本机出口 IPv4 的**真实子网掩码**推断（已排除回环与常见虚拟网卡）；掩码取不到或网段过大时回退 `/24`。
+- 每条结果含 `source`(`snmp`/`web`)、`vendor`、`model`、`status`(`identified`/`suspect`/`unknown`)，并保留旧字段 `ip`/`title`/`url`/`brand` 以兼容界面。
 - 结果以「`IP  |  型号`」形式填入下拉框，选中即自动填入复印机 IP。
 - 扫描在子线程执行，期间界面不卡顿，进度实时写入日志区。
-- 若复印机不在同网段、Web 端口非上述三者、或被防火墙拦截，可能扫描不到——此时直接在「复印机 IP」手动输入即可继续注册。
-- 扫描仅用于发现设备，不会修改任何主机。
+- 使用前提：复印机需启用 SNMP 且团体名为 `public`（多数 bizhub 默认开启）；若未开启 SNMP，会自动回退到 Web 识别。
+- 若仍扫描不到，直接在「复印机 IP」手动输入即可继续注册。扫描仅用于发现设备，不会修改任何主机。
 
 ## IPv6 地址处理
 
